@@ -1,0 +1,15 @@
+{
+  "name": "poller-inter",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "poller.js",
+  "scripts": {
+    "start": "node poller.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
