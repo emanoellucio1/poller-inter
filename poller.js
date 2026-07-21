@@ -66,13 +66,42 @@ async function fetchExtrato() {
   const inicio = new Date(hoje);
   inicio.setDate(inicio.getDate() - Number(LOOKBACK_DAYS));
 
-  const url = `https://cdpj.partners.bancointer.com.br/banking/v2/extrato?dataInicio=${fmtDate(inicio)}&dataFim=${fmtDate(hoje)}`;
-  const res = await fetch(url, {
-    agent,
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error(`Extrato falhou: ${res.status} ${await res.text()}`);
-  return res.json();
+  // Usa o endpoint "extrato-completo" para receber os detalhes de cada
+  // transação — é dele que vem o endToEndId real do PIX (E + ISPB + data + sufixo),
+  // o mesmo que aparece no comprovante do cliente.
+  const pageSize = 100;
+  const transacoes = [];
+  let pagina = 0;
+  // Segurança: no máximo 20 páginas por ciclo pra não travar.
+  for (; pagina < 20; pagina++) {
+    const url =
+      `https://cdpj.partners.bancointer.com.br/banking/v2/extrato/completo` +
+      `?dataInicio=${fmtDate(inicio)}&dataFim=${fmtDate(hoje)}` +
+      `&pagina=${pagina}&tamanhoPagina=${pageSize}`;
+
+    const res = await fetch(url, {
+      agent,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Extrato falhou: ${res.status} ${await res.text()}`);
+    const json = await res.json();
+    const lote = json.transacoes ?? [];
+    for (const t of lote) {
+      // Achata `detalhes.endToEndId` (e afins) pro topo, formato que o
+      // endpoint /api/public/ingest-extrato-inter espera.
+      const d = t.detalhes ?? {};
+      transacoes.push({
+        ...t,
+        endToEndId: d.endToEndId ?? d.endToEnd ?? t.endToEndId ?? undefined,
+        idTransacao: d.idTransacao ?? t.idTransacao ?? undefined,
+        pagador: d.nomePagador ?? d.pagador ?? undefined,
+        cpfCnpjPagador: d.cpfCnpjPagador ?? undefined,
+      });
+    }
+    if (lote.length < pageSize) break;
+  }
+
+  return transacoes;
 }
 
 async function sendToPanel(transacoes) {
@@ -91,8 +120,7 @@ async function sendToPanel(transacoes) {
 
 async function tick() {
   try {
-    const extrato = await fetchExtrato();
-    const transacoes = extrato.transacoes ?? [];
+    const transacoes = await fetchExtrato();
     if (transacoes.length === 0) {
       console.log("· sem transações no período");
       return;
