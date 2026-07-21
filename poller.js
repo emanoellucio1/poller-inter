@@ -87,15 +87,23 @@ async function fetchExtrato() {
     const json = await res.json();
     const lote = json.transacoes ?? [];
     for (const t of lote) {
-      // Achata `detalhes.endToEndId` (e afins) pro topo, formato que o
-      // endpoint /api/public/ingest-extrato-inter espera.
+      // Achata `detalhes.*` pro topo, formato que o endpoint
+      // /api/public/ingest-extrato-inter espera. `...d` primeiro para que os
+      // campos base de `t` (descricao, titulo, dataEntrada) prevaleçam,
+      // e depois sobrescrevemos os campos que sabemos vir mais completos
+      // nos detalhes (endToEndId oficial, nomePagador, cpfCnpjPagador).
       const d = t.detalhes ?? {};
       transacoes.push({
+        ...d,
         ...t,
         endToEndId: d.endToEndId ?? d.endToEnd ?? t.endToEndId ?? undefined,
         idTransacao: d.idTransacao ?? t.idTransacao ?? undefined,
-        pagador: d.nomePagador ?? d.pagador ?? undefined,
-        cpfCnpjPagador: d.cpfCnpjPagador ?? undefined,
+        pagador: d.nomePagador ?? d.pagador ?? d.nomeRecebedor ?? undefined,
+        cpfCnpjPagador: d.cpfCnpjPagador ?? d.cpfCnpjRecebedor ?? undefined,
+        // Se o campo de descrição do topo estiver vazio mas os detalhes
+        // trouxerem algo (ex: "Cp: 12345678900 - JOAO"), usamos ele pra
+        // conseguir extrair nome/cpf via parser do lado do servidor.
+        descricao: t.descricao || d.descricao || d.descricaoOperacao || undefined,
       });
     }
     if (lote.length < pageSize) break;
