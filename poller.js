@@ -91,7 +91,7 @@ async function fetchExtrato() {
       // /api/public/ingest-extrato-inter espera. `...d` primeiro para que os
       // campos base de `t` (descricao, titulo, dataEntrada) prevaleçam,
       // e depois sobrescrevemos os campos que sabemos vir mais completos
-      // nos detalhes (endToEndId oficial, nomePagador, cpfCnpjPagador).
+      // nos detalhes (endToEndId oficial, nomePagador, cpfCnpjPagador, chavePix).
       const d = t.detalhes ?? {};
       transacoes.push({
         ...d,
@@ -100,9 +100,15 @@ async function fetchExtrato() {
         idTransacao: d.idTransacao ?? t.idTransacao ?? undefined,
         pagador: d.nomePagador ?? d.pagador ?? d.nomeRecebedor ?? undefined,
         cpfCnpjPagador: d.cpfCnpjPagador ?? d.cpfCnpjRecebedor ?? undefined,
-        // Se o campo de descrição do topo estiver vazio mas os detalhes
-        // trouxerem algo (ex: "Cp: 12345678900 - JOAO"), usamos ele pra
-        // conseguir extrair nome/cpf via parser do lado do servidor.
+        // Chave PIX usada pelo pagador para creditar a conta. Usado no app pra
+        // rotear a transação para a loja correta (várias lojas na mesma conta).
+        chavePix:
+          d.chavePix ??
+          d.chave ??
+          d.chaveRecebedor ??
+          d.chavePagador ??
+          t.chavePix ??
+          undefined,
         descricao: t.descricao || d.descricao || d.descricaoOperacao || undefined,
       });
     }
