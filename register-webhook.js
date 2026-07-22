@@ -1,5 +1,3 @@
-cd /opt/render/project
-cat > src/register-webhook.js << 'EOF'
 // Registra o webhook no Banco Inter para uma ou mais chaves Pix.
 // Uso no Render Shell (ou local):
 //   cd /opt/render/project
@@ -132,4 +130,3 @@ try {
   console.error("❌ Falha geral:", err.message);
   process.exit(1);
 }
-EOF
