@@ -1,23 +1,24 @@
+cd /opt/render/project
+cat > src/register-webhook.js << 'EOF'
 // Registra o webhook no Banco Inter para uma ou mais chaves Pix.
-// Uso (local ou como Render Job):
-//   node register-webhook.js
-//
-// Variáveis de ambiente necessárias:
-//   INTER_CLIENT_ID        - clientId da app com escopo webhook.write
-//   INTER_CLIENT_SECRET    - clientSecret dessa mesma app
-//   INTER_CERT_PATH        - caminho do cert.crt (mTLS)
-//   INTER_KEY_PATH         - caminho do cert.key (mTLS)
-//   WEBHOOK_URL            - URL pública que o Inter vai chamar
-//   PIX_KEYS               - lista de chaves separadas por vírgula
+// Uso no Render Shell (ou local):
+//   cd /opt/render/project
+//   export INTER_CLIENT_ID=...
+//   export INTER_CLIENT_SECRET=...
+//   export INTER_CERT_PATH=/etc/secrets/cert.crt
+//   export INTER_KEY_PATH=/etc/secrets/cert.key
+//   export WEBHOOK_URL=https://pixel-perfect-clone-53016.lovable.app/api/public/webhook-pix-inter
+//   export PIX_KEYS="33548259000201,823edc7c-7250-46ab-bae2-3484284b2be0,ff5bb840-b067-4099-9581-0fc749c216e7"
+//   node src/register-webhook.js
 
-const fs = require("fs");
-const https = require("https");
+import fs from "node:fs";
+import https from "node:https";
 
 const {
   INTER_CLIENT_ID,
   INTER_CLIENT_SECRET,
-  INTER_CERT_PATH,
-  INTER_KEY_PATH,
+  INTER_CERT_PATH = "./cert.crt",
+  INTER_KEY_PATH = "./cert.key",
   WEBHOOK_URL,
   PIX_KEYS,
 } = process.env;
@@ -30,7 +31,9 @@ if (
   !WEBHOOK_URL ||
   !PIX_KEYS
 ) {
-  console.error("❌ Variáveis faltando. Confira INTER_CLIENT_ID, INTER_CLIENT_SECRET, INTER_CERT_PATH, INTER_KEY_PATH, WEBHOOK_URL, PIX_KEYS.");
+  console.error(
+    "❌ Variáveis faltando. Confira INTER_CLIENT_ID, INTER_CLIENT_SECRET, INTER_CERT_PATH, INTER_KEY_PATH, WEBHOOK_URL, PIX_KEYS.",
+  );
   process.exit(1);
 }
 
@@ -40,6 +43,24 @@ const agent = new https.Agent({ cert, key });
 
 const BASE = "https://cdpj.partners.bancointer.com.br";
 
+function request(path, method, headers, body) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      `${BASE}${path}`,
+      { method, headers, agent },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => resolve({ status: res.statusCode, body: data }));
+      },
+    );
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 async function getToken() {
   const body = new URLSearchParams({
     client_id: INTER_CLIENT_ID,
@@ -48,47 +69,54 @@ async function getToken() {
     scope: "webhook.write webhook.read",
   }).toString();
 
-  const res = await fetch(`${BASE}/oauth/v2/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  const res = await request(
+    "/oauth/v2/token",
+    "POST",
+    {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Length": Buffer.byteLength(body),
+    },
     body,
-    agent,
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`OAuth ${res.status}: ${text}`);
-  return JSON.parse(text).access_token;
+  );
+  if (res.status !== 200) throw new Error(`OAuth ${res.status}: ${res.body}`);
+  return JSON.parse(res.body).access_token;
 }
 
 async function registerWebhook(token, chave) {
-  const res = await fetch(`${BASE}/pix/v2/webhook/${encodeURIComponent(chave)}`, {
-    method: "PUT",
-    headers: {
+  const body = JSON.stringify({ webhookUrl: WEBHOOK_URL });
+  const res = await request(
+    `/pix/v2/webhook/${encodeURIComponent(chave)}`,
+    "PUT",
+    {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(body),
     },
-    body: JSON.stringify({ webhookUrl: WEBHOOK_URL }),
-    agent,
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`PUT ${chave} → ${res.status}: ${text}`);
-  return text || "ok";
+    body,
+  );
+  if (res.status !== 200 && res.status !== 201 && res.status !== 204) {
+    throw new Error(`PUT ${chave} → ${res.status}: ${res.body}`);
+  }
+  return res.body || "ok";
 }
 
 async function getWebhook(token, chave) {
-  const res = await fetch(`${BASE}/pix/v2/webhook/${encodeURIComponent(chave)}`, {
-    headers: { Authorization: `Bearer ${token}` },
-    agent,
-  });
-  const text = await res.text();
-  return `${res.status} ${text}`;
+  const res = await request(
+    `/pix/v2/webhook/${encodeURIComponent(chave)}`,
+    "GET",
+    { Authorization: `Bearer ${token}` },
+    null,
+  );
+  return `${res.status} ${res.body}`;
 }
 
-(async () => {
-  console.log("🔑 Obtendo token OAuth...");
+const chaves = PIX_KEYS.split(",").map((s) => s.trim()).filter(Boolean);
+
+console.log("🔑 Obtendo token OAuth...");
+try {
   const token = await getToken();
   console.log("✅ Token OK.");
 
-  const chaves = PIX_KEYS.split(",").map((s) => s.trim()).filter(Boolean);
   for (const chave of chaves) {
     try {
       console.log(`\n➡️  Registrando webhook para: ${chave}`);
@@ -100,4 +128,8 @@ async function getWebhook(token, chave) {
       console.error(`❌ Falhou para ${chave}:`, err.message);
     }
   }
-})();
+} catch (err) {
+  console.error("❌ Falha geral:", err.message);
+  process.exit(1);
+}
+EOF
