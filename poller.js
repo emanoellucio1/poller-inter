@@ -87,29 +87,15 @@ async function fetchExtrato() {
     const json = await res.json();
     const lote = json.transacoes ?? [];
     for (const t of lote) {
-      // Achata `detalhes.*` pro topo, formato que o endpoint
-      // /api/public/ingest-extrato-inter espera. `...d` primeiro para que os
-      // campos base de `t` (descricao, titulo, dataEntrada) prevaleçam,
-      // e depois sobrescrevemos os campos que sabemos vir mais completos
-      // nos detalhes (endToEndId oficial, nomePagador, cpfCnpjPagador, chavePix).
+      // Achata `detalhes.endToEndId` (e afins) pro topo, formato que o
+      // endpoint /api/public/ingest-extrato-inter espera.
       const d = t.detalhes ?? {};
       transacoes.push({
-        ...d,
         ...t,
         endToEndId: d.endToEndId ?? d.endToEnd ?? t.endToEndId ?? undefined,
         idTransacao: d.idTransacao ?? t.idTransacao ?? undefined,
-        pagador: d.nomePagador ?? d.pagador ?? d.nomeRecebedor ?? undefined,
-        cpfCnpjPagador: d.cpfCnpjPagador ?? d.cpfCnpjRecebedor ?? undefined,
-        // Chave PIX usada pelo pagador para creditar a conta. Usado no app pra
-        // rotear a transação para a loja correta (várias lojas na mesma conta).
-        chavePix:
-          d.chavePix ??
-          d.chave ??
-          d.chaveRecebedor ??
-          d.chavePagador ??
-          t.chavePix ??
-          undefined,
-        descricao: t.descricao || d.descricao || d.descricaoOperacao || undefined,
+        pagador: d.nomePagador ?? d.pagador ?? undefined,
+        cpfCnpjPagador: d.cpfCnpjPagador ?? undefined,
       });
     }
     if (lote.length < pageSize) break;
