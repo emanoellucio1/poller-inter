@@ -19,8 +19,8 @@ const {
   INTER_PIX_KEY_PATH,
   INGEST_URL,
   INGEST_TOKEN,
-  POLL_INTERVAL_MS = "15000",
-  LOOKBACK_DAYS = "2",
+  POLL_INTERVAL_MS = "30000",
+  LOOKBACK_DAYS = "1",
 } = process.env;
 
 const required = { INTER_CLIENT_ID, INTER_CLIENT_SECRET, INGEST_URL, INGEST_TOKEN };
@@ -105,16 +105,22 @@ async function fetchExtrato() {
   inicio.setDate(inicio.getDate() - Number(LOOKBACK_DAYS));
 
   const pageSize = 100;
-  const maxPages = Number(process.env.MAX_PAGES || "5");
+  const maxPages = Number(process.env.MAX_PAGES || "3");
+  const pageDelayMs = Number(process.env.PAGE_DELAY_MS || "1500");
   const transacoes = [];
   let pagina = 0;
   for (; pagina < maxPages; pagina++) {
+    if (pagina > 0) await new Promise((r) => setTimeout(r, pageDelayMs));
     const url =
       `https://cdpj.partners.bancointer.com.br/banking/v2/extrato/completo` +
       `?dataInicio=${fmtDate(inicio)}&dataFim=${fmtDate(hoje)}` +
       `&pagina=${pagina}&tamanhoPagina=${pageSize}`;
 
     const res = await fetchWithBackoff(url, { agent, headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 429) {
+      console.warn(`⚠️ Extrato 429 persistente na página ${pagina} — usando o que já veio (${transacoes.length} tx)`);
+      break;
+    }
     if (!res.ok) throw new Error(`Extrato falhou: ${res.status} ${await res.text()}`);
     const json = await res.json();
     const lote = json.transacoes ?? [];
@@ -191,11 +197,11 @@ async function fetchExtrato() {
   return transacoes;
 }
 
-async function fetchWithBackoff(url, options, maxAttempts = 3) {
+async function fetchWithBackoff(url, options, maxAttempts = 5) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const res = await fetch(url, options);
     if (res.status !== 429 || attempt === maxAttempts) return res;
-    const wait = 2000 * attempt;
+    const wait = Math.min(30000, 5000 * attempt);
     console.warn(`⏳ 429 rate limit — aguardando ${wait}ms (tentativa ${attempt}/${maxAttempts})`);
     await new Promise((r) => setTimeout(r, wait));
   }
