@@ -105,18 +105,16 @@ async function fetchExtrato() {
   inicio.setDate(inicio.getDate() - Number(LOOKBACK_DAYS));
 
   const pageSize = 100;
+  const maxPages = Number(process.env.MAX_PAGES || "5");
   const transacoes = [];
   let pagina = 0;
-  for (; pagina < 20; pagina++) {
+  for (; pagina < maxPages; pagina++) {
     const url =
       `https://cdpj.partners.bancointer.com.br/banking/v2/extrato/completo` +
       `?dataInicio=${fmtDate(inicio)}&dataFim=${fmtDate(hoje)}` +
       `&pagina=${pagina}&tamanhoPagina=${pageSize}`;
 
-    const res = await fetch(url, {
-      agent,
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await fetchWithBackoff(url, { agent, headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(`Extrato falhou: ${res.status} ${await res.text()}`);
     const json = await res.json();
     const lote = json.transacoes ?? [];
@@ -137,15 +135,15 @@ async function fetchExtrato() {
           t.chavePix ??
           undefined,
         descricao: t.descricao || d.descricao || d.descricaoOperacao || undefined,
+        dataHoraMovimento: t.dataHoraMovimento ?? d.dataHoraMovimento ?? t.dataInclusao ?? undefined,
       });
     }
     if (lote.length < pageSize) break;
   }
 
-  // Enriquecimento: quando a chavePix vier vazia no extrato (comum quando o
-  // pagador é de outro banco, ex: BB endToEndId E00000000...), consulta o
-  // endpoint oficial de PIX pelo endToEndId para recuperar a chave do
-  // recebedor. Usa credenciais com escopo pix.read (INTER_PIX_*).
+  // Enriquecimento: SÓ para transações recentes e com endToEndId válido do
+  // BACEN. IDs "sintéticos" do Inter (com letras minúsculas) nunca existem
+  // na API oficial do PIX — pular direto.
   let pixToken;
   try {
     pixToken = await getPixToken();
@@ -153,13 +151,24 @@ async function fetchExtrato() {
     console.warn(`⚠️  não foi possível obter token pix.read: ${e.message}`);
   }
 
+  const enrichWindowMin = Number(process.env.ENRICH_WINDOW_MIN || "30");
+  const maxEnrich = Number(process.env.MAX_ENRICH_PER_CYCLE || "20");
+  const cutoff = Date.now() - enrichWindowMin * 60_000;
+  // E2E BACEN válido: E + 8 dígitos ISPB + 12 dígitos data + 11 alfanuméricos MAIÚSCULOS
+  const validE2E = /^E\d{8}\d{12}[A-Z0-9]{11}$/;
+
   const faltantes = pixToken
-    ? transacoes.filter(
-        (t) => !t.chavePix && t.endToEndId && /^E\d{8}/.test(String(t.endToEndId)),
-      )
+    ? transacoes
+        .filter((t) => {
+          if (t.chavePix) return false;
+          if (!t.endToEndId || !validE2E.test(String(t.endToEndId))) return false;
+          const ts = t.dataHoraMovimento ? Date.parse(t.dataHoraMovimento) : NaN;
+          return isNaN(ts) ? true : ts >= cutoff;
+        })
+        .slice(0, maxEnrich)
     : [];
   if (faltantes.length > 0) {
-    console.log(`🔎 buscando detalhe PIX para ${faltantes.length} transação(ões) sem chave`);
+    console.log(`🔎 buscando detalhe PIX para ${faltantes.length} transação(ões) sem chave (janela ${enrichWindowMin}min)`);
   }
   for (const t of faltantes) {
     try {
@@ -173,7 +182,7 @@ async function fetchExtrato() {
       const pag = det.pagador ?? {};
       if (!t.pagador) t.pagador = pag.nome ?? det.nomePagador ?? undefined;
       if (!t.cpfCnpjPagador) t.cpfCnpjPagador = pag.cpfCnpj ?? pag.cnpj ?? pag.cpf ?? undefined;
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 200));
     } catch (e) {
       console.warn(`· erro ao consultar detalhe ${t.endToEndId}: ${e.message}`);
     }
@@ -182,9 +191,20 @@ async function fetchExtrato() {
   return transacoes;
 }
 
+async function fetchWithBackoff(url, options, maxAttempts = 3) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await fetch(url, options);
+    if (res.status !== 429 || attempt === maxAttempts) return res;
+    const wait = 2000 * attempt;
+    console.warn(`⏳ 429 rate limit — aguardando ${wait}ms (tentativa ${attempt}/${maxAttempts})`);
+    await new Promise((r) => setTimeout(r, wait));
+  }
+  return fetch(url, options);
+}
+
 async function fetchPixDetailWithRetry(endToEndId, pixToken) {
-  const attempts = Number(process.env.PIX_DETAIL_RETRIES || "4");
-  const retryDelay = Number(process.env.PIX_DETAIL_RETRY_DELAY_MS || "2500");
+  const attempts = Number(process.env.PIX_DETAIL_RETRIES || "2");
+  const retryDelay = Number(process.env.PIX_DETAIL_RETRY_DELAY_MS || "3000");
   const url = `https://cdpj.partners.bancointer.com.br/pix/v2/pix/${encodeURIComponent(endToEndId)}`;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -196,13 +216,18 @@ async function fetchPixDetailWithRetry(endToEndId, pixToken) {
     if (res.ok) return res.json();
 
     const txt = await res.text();
+    // 404 do BCB é permanente: transação não indexada. Não retenta.
+    if (res.status === 404) {
+      console.warn(`· detalhe PIX ${endToEndId} não indexado (404) — pulando`);
+      return null;
+    }
     console.warn(
       `· detalhe PIX ${endToEndId} falhou: ${res.status} ${txt.slice(0, 200)}${
         attempt < attempts ? ` — tentativa ${attempt}/${attempts}` : ""
       }`,
     );
 
-    if (![404, 429, 500, 502, 503, 504].includes(res.status) || attempt === attempts) {
+    if (![429, 500, 502, 503, 504].includes(res.status) || attempt === attempts) {
       return null;
     }
     await new Promise((r) => setTimeout(r, retryDelay));
