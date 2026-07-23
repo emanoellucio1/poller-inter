@@ -76,7 +76,7 @@ async function getToken() {
   const json = await fetchToken(
     INTER_CLIENT_ID,
     INTER_CLIENT_SECRET,
-    "extrato.read pix.read",
+    "extrato.read",
     agent,
   );
   cachedToken = json.access_token;
@@ -86,7 +86,6 @@ async function getToken() {
 }
 
 async function getPixToken() {
-  if (!pixIsSeparate) return getToken();
   if (cachedPixToken && Date.now() < pixTokenExpiresAt - 60_000) return cachedPixToken;
   const json = await fetchToken(pixClientId, pixClientSecret, "pix.read", pixAgent);
   cachedPixToken = json.access_token;
@@ -164,18 +163,9 @@ async function fetchExtrato() {
   }
   for (const t of faltantes) {
     try {
-      const url = `https://cdpj.partners.bancointer.com.br/pix/v2/pix/${t.endToEndId}`;
-      const res = await fetch(url, {
-        agent: pixAgent,
-        headers: { Authorization: `Bearer ${pixToken}` },
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        console.warn(`· detalhe PIX ${t.endToEndId} falhou: ${res.status} ${txt.slice(0, 200)}`);
-        continue;
-      }
-      const det = await res.json();
-      const chave = det.chave ?? det.chavePix ?? det.chaveRecebedor;
+      const det = await fetchPixDetailWithRetry(t.endToEndId, pixToken);
+      if (!det) continue;
+      const chave = findRecebedorKey(det);
       if (chave) {
         t.chavePix = chave;
         console.log(`✔ chave recuperada para ${t.endToEndId}: ${chave}`);
@@ -190,6 +180,50 @@ async function fetchExtrato() {
   }
 
   return transacoes;
+}
+
+async function fetchPixDetailWithRetry(endToEndId, pixToken) {
+  const attempts = Number(process.env.PIX_DETAIL_RETRIES || "4");
+  const retryDelay = Number(process.env.PIX_DETAIL_RETRY_DELAY_MS || "2500");
+  const url = `https://cdpj.partners.bancointer.com.br/pix/v2/pix/${encodeURIComponent(endToEndId)}`;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const res = await fetch(url, {
+      agent: pixAgent,
+      headers: { Authorization: `Bearer ${pixToken}` },
+    });
+
+    if (res.ok) return res.json();
+
+    const txt = await res.text();
+    console.warn(
+      `· detalhe PIX ${endToEndId} falhou: ${res.status} ${txt.slice(0, 200)}${
+        attempt < attempts ? ` — tentativa ${attempt}/${attempts}` : ""
+      }`,
+    );
+
+    if (![404, 429, 500, 502, 503, 504].includes(res.status) || attempt === attempts) {
+      return null;
+    }
+    await new Promise((r) => setTimeout(r, retryDelay));
+  }
+  return null;
+}
+
+function findRecebedorKey(detail) {
+  const candidates = [
+    detail?.chave,
+    detail?.chavePix,
+    detail?.chaveRecebedor,
+    detail?.chavePixRecebedor,
+    detail?.recebedor?.chave,
+    detail?.recebedor?.chavePix,
+  ];
+
+  for (const value of candidates) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
 }
 
 
